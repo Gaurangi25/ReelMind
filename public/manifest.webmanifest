@@ -1,4 +1,3 @@
-
 {
   "id": "/",
   "name": "ReelMind - Your Personal Video Library",
@@ -7,8 +6,8 @@
   "start_url": "/",
   "scope": "/",
   "display": "standalone",
-  "background_color": "#ffffff",
-  "theme_color": "#234f3d",
+  "background_color": "#f5f2eb",
+  "theme_color": "#1e385d",
   "icons": [
     {
       "src": "/icon-192.png",

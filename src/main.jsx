@@ -18,6 +18,9 @@ import {
   SlidersHorizontal,
   ChevronDown,
   LayoutGrid,
+  List,
+  PanelLeftClose,
+  PanelLeftOpen,
   Clock3,
   Instagram,
   Youtube,
@@ -30,6 +33,9 @@ if (import.meta.env.DEV) {
   window.testFolderPrivacy = testFolderPrivacy;
 }
 import "./style.css";
+import { AppearanceProvider, useAppearance } from "./appearance/AppearanceContext";
+import AppearanceSettings from "./appearance/AppearanceSettings";
+import "./appearance/appearance.css";
 const demo = [
   {
     id: "d1",
@@ -154,6 +160,8 @@ function youtubeThumbnail(link) {
 }
 
 function App() {
+  const {prefs, update, ready} = useAppearance();
+  const sidebarCollapsed = prefs.sidebarCollapsed;
   const [session, setSession] = useState(null),
     [loading, setLoading] = useState(configured),
     [authMode, setAuthMode] = useState("signin"),
@@ -840,7 +848,7 @@ function App() {
       </div>
     );
   return (
-    <div className="shell">
+    <div className={"shell" + (sidebarCollapsed ? " sidebar-collapsed" : "")}>
       <aside className={"sidebar " + (menu ? "open" : "")}>
         <div className="sidebar-top">
           <div className="logo">
@@ -849,6 +857,7 @@ function App() {
             </span>{" "}
             reelmind<span className="brand-dot">.</span>
           </div>
+          <button type="button" className="icon-btn desktop-sidebar-toggle sidebar-collapse" disabled={!ready} aria-label="Collapse sidebar" title="Collapse sidebar" aria-expanded={true} onClick={()=>update({sidebarCollapsed:true})}><PanelLeftClose size={18}/></button>
           <button
             className="icon-btn close-mobile"
             onClick={() => setMenu(false)}
@@ -909,6 +918,7 @@ function App() {
             .map((c) => nav(c, "category:" + c, BookOpen))}
         </div>
         <div className="sidebar-bottom">
+          <AppearanceSettings />
           <div className="privacy">
             <ShieldCheck size={16} />
             <span>Private by default</span>
@@ -929,6 +939,7 @@ function App() {
       {menu && <div className="scrim" onClick={() => setMenu(false)} />}
       <main className="main">
         <header className="topbar">
+          {sidebarCollapsed && <button type="button" className="icon-btn desktop-sidebar-toggle sidebar-reopen" disabled={!ready} aria-label="Expand sidebar" title="Expand sidebar" aria-expanded={false} onClick={()=>update({sidebarCollapsed:false})}><PanelLeftOpen size={20}/></button>}
           <button className="icon-btn hamburger" onClick={() => setMenu(true)}>
             <Menu size={22} />
           </button>
@@ -978,6 +989,7 @@ function App() {
                 </button>
               )}
             </div>
+            <div className="layout-switch" role="group" aria-label="Library layout">{[["grid",LayoutGrid],["list",List]].map(([mode,Icon])=><button type="button" key={mode} disabled={!ready} aria-label={`${mode} view`} title={`${mode} view`} aria-pressed={prefs.layout===mode} onClick={()=>update({layout:mode})}><Icon size={18}/></button>)}</div>
             <button className="filter" title="Showing newest first">
               <SlidersHorizontal size={17} /> Newest first
             </button>
@@ -1022,7 +1034,7 @@ function App() {
               </button>
             </div>
           )}
-          <div className="cards visual-grid">
+          <div className={"cards visual-grid" + (prefs.layout === "list" ? " visual-list" : "")}>
             {shown.map((item) => {
               const thumbnail = item.platform === "youtube" ? youtubeThumbnail(item.url) : null;
               return (
@@ -1323,4 +1335,4 @@ if ("serviceWorker" in navigator) {
   });
 }
 
-createRoot(document.getElementById("root")).render(<App />);
+createRoot(document.getElementById("root")).render(<AppearanceProvider><App /></AppearanceProvider>);

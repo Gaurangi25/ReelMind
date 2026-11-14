@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="en">
+
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width,initial-scale=1">
+    <title>ReelMind</title>
+    <link rel="stylesheet" href="popup.css">
+</head>
+
+<body>
+    <header><img src="icons/48.png" alt="">
+        <div>
+            <h1>reelmind.</h1><small>Good things, worth keeping.</small>
+        </div>
+    </header>
+    <section id="loginPanel"><h2>Sign in to ReelMind</h2><form id="loginForm"><label for="email">Email</label><input id="email" type="email" required><label for="password">Password</label><input id="password" type="password" required><button>Sign in</button></form><p id="loginStatus" role="status"></p></section><section id="savePanel" hidden> <span id="platform">Checking current tab…</span>
+        <h2 id="title">Save something worth keeping</h2><label for="url">Video URL</label><input id="url" type="url"
+            placeholder="Paste a video link"><label for="folder">Save to folder</label><select id="folder"><option value="">Unsorted</option></select><label for="notes">Personal notes
+            <small>(optional)</small></label><textarea id="notes"
+            placeholder="Why are you saving this?"></textarea><button id="save">Save to ReelMind</button><button
+            id="open" class="secondary">Open my library ↗</button>
+        <p id="status" role="status"></p>
+    <button id="logout" class="secondary">Sign out</button></section>
+    <footer>Private by default · Keep this popup open while saving.</footer>
+    <script type="module" src="popup.js"></script>
+</body>
+
+</html>

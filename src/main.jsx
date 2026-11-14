@@ -24,7 +24,7 @@ import {
 } from "lucide-react";
 import { supabase, configured } from "./supabase";
 import { testFolderPrivacy } from "./securityTest";
-import { classifyVideo, fetchVideoTitle } from "./ai";
+import { classifyVideo, fetchVideoTitle, fetchInstagramMetadata } from "./ai";
 import { taxonomyV3 } from "./taxonomy";
 if (import.meta.env.DEV) {
   window.testFolderPrivacy = testFolderPrivacy;
@@ -183,6 +183,9 @@ function App() {
   const [aiLoading, setAiLoading] = useState(false);
   const [aiSuggestion, setAiSuggestion] = useState(null);
   const aiRequest = useRef(0);
+  const manualTopic = useRef(false);
+  const instagramCaption = useRef("");
+  const instagramCache = useRef(new Map());
   const [titleLoading, setTitleLoading] = useState(false);
   const titleRequest = useRef(0);
   const sharedLinkHandled = useRef(false);
@@ -215,6 +218,8 @@ function App() {
     const sharedTitle = (params.get("title") || "").trim().slice(0, 200);
     const urlHost = new URL(sharedUrl).hostname.toLowerCase();
     const isInstagram = ["instagram.com", "www.instagram.com", "m.instagram.com"].includes(urlHost);
+    manualTopic.current = false;
+    instagramCaption.current = "";
     setUrl(sharedUrl);
     setTitle(isInstagram ? sharedTitle : "");
     const sharedCategory = isInstagram && sharedTitle ? suggest(sharedTitle) : defaultCategory;
@@ -317,6 +322,8 @@ function App() {
   }
 
     useEffect(() => {
+    setAiLoading(false);
+    setTitleLoading(false);
     if (!modal || !session || !supabase) return;
 
     const requestId = ++titleRequest.current;
@@ -339,31 +346,59 @@ function App() {
         "www.youtu.be",
     ].includes(host);
 
-    if (!isYouTube) {
+    const isInstagram = parsed.protocol === "https:" &&
+      ["instagram.com", "www.instagram.com", "m.instagram.com"].includes(host) &&
+      !parsed.username && !parsed.password && !parsed.port &&
+      /^\/(?:reels?|p)\/[A-Za-z0-9_-]+\/?$/.test(parsed.pathname);
+    if (!isYouTube && !isInstagram) {
         setTitleLoading(false);
         return;
     }
 
+    setTitleLoading(true);
     const timer = setTimeout(async () => {
-        setTitleLoading(true);
 
         try {
-        const fetchedTitle = await fetchVideoTitle(input);
+        let fetchedTitle, description = "";
+        if (isInstagram) {
+          const path = parsed.pathname.replace(/^\/reels\//, "/reel/").replace(/\/$/, "") + "/";
+          const canonical = "https://www.instagram.com" + path;
+          const key = session.user.id + ":" + canonical;
+          let pending = instagramCache.current.get(key);
+          if (!pending) {
+            pending = fetchInstagramMetadata(canonical).catch((error) => {
+              instagramCache.current.delete(key);
+              throw error;
+            });
+            instagramCache.current.set(key, pending);
+          }
+          const metadata = await pending;
+          fetchedTitle = metadata.title;
+          description = metadata.description;
+        } else {
+          fetchedTitle = await fetchVideoTitle(input);
+        }
 
         if (requestId !== titleRequest.current) return;
 
+        if (typeof fetchedTitle !== "string" || !fetchedTitle.trim()) {
+          throw new Error("No video title was returned.");
+        }
+        instagramCaption.current = description;
         setTitle(fetchedTitle);
-        const inferredCategory = suggest(fetchedTitle);
-        setCategory(inferredCategory);
-        setSubcategory(suggestedSubcategory(fetchedTitle, inferredCategory));
-        setAiSuggestion(null);
-        aiRequest.current += 1;
+        if (!manualTopic.current) {
+          const inferredCategory = suggest(fetchedTitle);
+          setCategory(inferredCategory);
+          setSubcategory(suggestedSubcategory(fetchedTitle, inferredCategory));
+          // Pass the fetched value directly; React state may not be updated yet.
+          void suggestWithAI(fetchedTitle, description);
+        }
         } catch (error) {
-        console.error("YouTube title fetch failed:", error);
+        console.error("Video metadata fetch failed:", error);
 
         if (requestId === titleRequest.current) {
           setMessage(
-            "Could not fetch YouTube title: " +
+            isInstagram ? "Could not fetch Instagram caption. Enter a title manually and use Suggest with AI." : "Could not fetch YouTube title: " +
             (error?.message || "Unknown error")
           );
         }
@@ -377,11 +412,12 @@ function App() {
     return () => {
         clearTimeout(timer);
         titleRequest.current += 1;
+        aiRequest.current += 1;
     };
     }, [url, modal, session?.user?.id]);
 
-  async function suggestWithAI() {
-    if (!title.trim() || aiLoading) return;
+  async function suggestWithAI(videoTitle, description = "") {
+    if (!videoTitle.trim()) return;
     if (!supabase || !session) {
       setMessage("Sign in to use AI suggestions.");
       return;
@@ -390,8 +426,8 @@ function App() {
     setAiLoading(true);
     setAiSuggestion(null);
     try {
-      // Only the title is shared with the AI service, not private notes.
-      const result = await classifyVideo(title.trim());
+      // Only title and available caption are shared, not private notes.
+      const result = await classifyVideo(videoTitle.trim(), description);
       if (requestId !== aiRequest.current) return;
       if (!result || typeof result.category !== "string") {
         throw new Error("No valid AI suggestion was returned.");
@@ -423,6 +459,7 @@ function App() {
 
   async function save(e) {
     e.preventDefault();
+    if (busy || titleLoading || aiLoading) return;
     const platform = identify(url.trim());
     if (!platform) {
       setMessage("Enter a valid http(s) URL.");
@@ -484,12 +521,21 @@ function App() {
     }
     setBusy(false);
   }
+  function closeSaveModal() {
+    titleRequest.current += 1;
+    aiRequest.current += 1;
+    setTitleLoading(false);
+    setAiLoading(false);
+    setModal(false);
+  }
   function resetForm() {
+    manualTopic.current = false;
     titleRequest.current += 1;
     setTitleLoading(false);
     aiRequest.current += 1;
     setAiLoading(false);
     setAiSuggestion(null);
+    instagramCaption.current = "";
     setUrl("");
     setTitle("");
     setCategory(defaultCategory);
@@ -851,7 +897,7 @@ function App() {
         <div
           className="modal-backdrop"
           onMouseDown={(e) => {
-            if (e.target === e.currentTarget) { aiRequest.current += 1; setModal(false); }
+            if (e.target === e.currentTarget) { closeSaveModal(); }
           }}
         >
           <div
@@ -865,7 +911,7 @@ function App() {
                 <span className="eyebrow">ADD TO YOUR LIBRARY</span>
                 <h2>Save a link</h2>
               </div>
-              <button className="icon-btn" onClick={() => { aiRequest.current += 1; setModal(false); }}>
+              <button className="icon-btn" onClick={() => { closeSaveModal(); }}>
                 <X size={20} />
               </button>
             </div>
@@ -880,12 +926,15 @@ function App() {
                   onChange={(e) => {
                     titleRequest.current += 1;
                     setTitleLoading(false);
+                    manualTopic.current = false;
+                    instagramCaption.current = "";
                     setUrl(e.target.value);
                     setTitle("");
                     setCategory(defaultCategory);
                     setSubcategory(defaultSubcategory);
                     setAiSuggestion(null);
                     aiRequest.current += 1;
+                    setAiLoading(false);
                     }}
                 />
               </label>
@@ -901,35 +950,34 @@ function App() {
                     aiRequest.current += 1;
                     setAiLoading(false);
                     setAiSuggestion(null);
+                    instagramCaption.current = "";
                     setTitle(e.target.value);
-                    const inferredCategory = suggest(e.target.value);
-                    setCategory(inferredCategory);
-                    setSubcategory(suggestedSubcategory(e.target.value, inferredCategory));
+                    if (!manualTopic.current) {
+                      const inferredCategory = suggest(e.target.value);
+                      setCategory(inferredCategory);
+                      setSubcategory(suggestedSubcategory(e.target.value, inferredCategory));
+                    }
                   }}
                 />
               </label>
               {titleLoading && (
-                <small className="helper">Fetching YouTube title…</small>
+                <small className="helper">{identify(url.trim()) === "instagram" ? "Fetching Instagram caption…" : "Fetching YouTube title…"}</small>
               )}
               {identify(url.trim()) === "instagram" && (
                 <p className="helper" role="status">
-                  Instagram link detected. Add a short descriptive title or paste
-                  the Reel caption if available. Instagram may restrict automatic
-                  metadata access, especially for private posts. ReelMind saves
-                  the link, not a copy of the video. You can then use Suggest
-                  with AI to organize it.
+                  Instagram metadata is fetched automatically when available. If it cannot be retrieved, enter a descriptive title or caption and use Suggest with AI. ReelMind saves the link, not the video.
                 </p>
               )}
               <p className="helper">
-                AI suggestions send the title you enter to Google Gemini for
-                classification. ReelMind does not watch the video or send your
-                personal notes. You can always choose a topic yourself.
+                YouTube titles and available Instagram captions are automatically sent to Google Gemini for classification. Instagram links are sent to OpenGraph.io to retrieve metadata. For other links, use Suggest with AI.
+                ReelMind does not watch the video or send your personal notes.
+                You can always choose a topic yourself.
               </p>
               <button
                 type="button"
                 className="secondary"
-                disabled={aiLoading || !title.trim() || !supabase}
-                onClick={suggestWithAI}
+                disabled={titleLoading || aiLoading || !title.trim() || !supabase}
+                onClick={() => { manualTopic.current = false; void suggestWithAI(title, instagramCaption.current); }}
               >
                 {aiLoading ? "Analyzing…" : "Suggest with AI"}
               </button>
@@ -954,10 +1002,12 @@ function App() {
                   <select
                     value={category}
                     onChange={(e) => {
+                      manualTopic.current = true;
                       const nextCategory = e.target.value;
                       setCategory(nextCategory);
                       setSubcategory(nextCategory === defaultCategory ? defaultSubcategory : "");
                       aiRequest.current += 1;
+                      setAiLoading(false);
                     }}
                   >
                     <optgroup label="Smart categories">
@@ -987,8 +1037,10 @@ function App() {
                  <label>
                    Subcategory
                    <select value={subcategory} onChange={(e) => {
+                     manualTopic.current = true;
                      setSubcategory(e.target.value);
                      aiRequest.current += 1;
+                     setAiLoading(false);
                    }}>
                      <option value="">Choose a subcategory (optional)</option>
                      {subcategoriesFor(category).map((sub) => (
@@ -1011,11 +1063,11 @@ function App() {
                 <button
                   type="button"
                   className="secondary"
-                  onClick={() => { aiRequest.current += 1; setModal(false); }}
+                  onClick={() => { closeSaveModal(); }}
                 >
                   Cancel
                 </button>
-                <button className="primary" disabled={busy}>
+                <button className="primary" disabled={busy || titleLoading || aiLoading}>
                   <Bookmark size={16} />
                   {busy ? "Saving…" : "Save link"}
                 </button>

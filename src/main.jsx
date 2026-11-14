@@ -176,10 +176,22 @@ function App() {
     [title, setTitle] = useState(""),
     [category, setCategory] = useState(defaultCategory),
     [subcategory, setSubcategory] = useState(defaultSubcategory),
-    [folder, setFolder] = useState(""),
+    [folder, setFolder] = useState([]),
     [notes, setNotes] = useState(""),
     [folderName, setFolderName] = useState(""),
     [parent, setParent] = useState("");
+  const [memberships, setMemberships] = useState([]);
+  const [picker, setPicker] = useState(null);
+  const [selected, setSelected] = useState([]);
+  const [pickerSearch, setPickerSearch] = useState("");
+  const [pickerError, setPickerError] = useState("");
+  const [membershipReady, setMembershipReady] = useState(!configured);
+  const [inlineFolder, setInlineFolder] = useState(false);
+  const [inlineName, setInlineName] = useState("");
+  const [inlineParent, setInlineParent] = useState("");
+  const [folderSaving, setFolderSaving] = useState(false);
+  const [folderError, setFolderError] = useState("");
+  const [saveError, setSaveError] = useState("");
   const [aiLoading, setAiLoading] = useState(false);
   const [aiSuggestion, setAiSuggestion] = useState(null);
   const aiRequest = useRef(0);
@@ -226,7 +238,7 @@ function App() {
     setCategory(sharedCategory);
     setSubcategory(suggestedSubcategory(sharedTitle, sharedCategory));
     setAiSuggestion(null);
-    setFolder("");
+    setFolder([]);
     setNotes("");
     setModal(true);
   }, [loading, session?.user?.id]);
@@ -246,6 +258,9 @@ function App() {
       if (configured) {
         setItems([]);
         setFolders([]);
+        setMemberships([]);
+        setMembershipReady(false);
+        setPicker(null);
       }
       return;
     }
@@ -256,18 +271,24 @@ function App() {
         .select("*")
         .order("saved_at", { ascending: false }),
       supabase.from("folders").select("*").order("created_at"),
-    ]).then(([a, b]) => {
+      supabase.from("bookmark_folders").select("bookmark_id,folder_id"),
+    ]).then(([a, b, c]) => {
       if (cancelled) return;
       if (a.error || b.error) setMessage(a.error?.message || b.error?.message);
       else {
         setItems(a.data);
         setFolders(b.data);
+        if (c.error) { setMessage(c.error.message); setMembershipReady(false); }
+        else { setMemberships(c.data); setMembershipReady(true); }
       }
     });
     return () => {
       cancelled = true;
     };
   }, [session?.user?.id]);
+  const folderIds = (item) => supabase ? memberships.filter(m => m.bookmark_id === item.id).map(m => m.folder_id) : [...new Set([...(item.folder_id ? [item.folder_id] : []), ...memberships.filter(m => m.bookmark_id === item.id).map(m => m.folder_id)])];
+  const activeFolder = folders.find(f => active === "folder:" + f.id);
+  function openSave() { resetForm(); setFolder(activeFolder ? [activeFolder.id] : []); setModal(true); }
   // Filters combine with the existing folder/topic navigation and search.
   const availableSubcategories = useMemo(() =>
     [...new Set(items
@@ -288,7 +309,7 @@ function App() {
         (active === "all" ||
           active === "recent" ||
           (active === "unsorted" && x.category === "Unsorted") ||
-          (active.startsWith("folder:") && x.folder_id === active.slice(7)) ||
+          (active.startsWith("folder:") && folderIds(x).includes(active.slice(7))) ||
           (active.startsWith("category:") && x.category === active.slice(9))) &&
         (!browseSubcategory || x.subcategory === browseSubcategory) &&
         (!browseTag || (Array.isArray(x.tags) && x.tags.includes(browseTag))) &&
@@ -297,7 +318,7 @@ function App() {
           .join(" ").toLowerCase().includes(search.toLowerCase()),
       )
       .sort((a, b) => new Date(b.saved_at) - new Date(a.saved_at)),
-    [items, active, search, browseSubcategory, browseTag, reviewOnly],
+    [items, memberships, active, search, browseSubcategory, browseTag, reviewOnly],
   );
   const clearBrowseFilters = () => {
     setBrowseSubcategory("");
@@ -416,6 +437,8 @@ function App() {
     };
     }, [url, modal, session?.user?.id]);
 
+  useEffect(() => { if (modal) setMessage(""); }, [modal]);
+
   async function suggestWithAI(videoTitle, description = "") {
     if (!videoTitle.trim()) return;
     if (!supabase || !session) {
@@ -459,18 +482,20 @@ function App() {
 
   async function save(e) {
     e.preventDefault();
-    if (busy || titleLoading || aiLoading) return;
+    if (busy || titleLoading || aiLoading || folderSaving || inlineFolder) return;
+    setSaveError("");
+    if (!membershipReady && folder.length) { setSaveError("Folder data is unavailable. Refresh and try again before saving to a folder."); return; }
     const platform = identify(url.trim());
     if (!platform) {
-      setMessage("Enter a valid http(s) URL.");
+      setSaveError("Enter a valid http(s) URL.");
       return;
     }
     if (url.length > 2048) {
-      setMessage("URL is too long.");
+      setSaveError("URL is too long.");
       return;
     }
     if (platform === "instagram" && !title.trim()) {
-      setMessage("Add a short title for this Instagram post before saving.");
+      setSaveError("Add a short title for this Instagram post before saving.");
       return;
     }
     setBusy(true);
@@ -485,43 +510,70 @@ function App() {
         ? (aiSuggestion.confidence ?? null) : null,
       needs_review: aiSuggestion?.category === category && aiSuggestion?.subcategory === subcategory
         ? (aiSuggestion.needsReview ?? false) : false,
-      folder_id: folder || null,
+      folder_id: null,
       notes: notes.trim(),
     };
     if (supabase) {
-      const { data, error } = await supabase
-        .from("bookmarks")
-        .insert({ ...payload, user_id: session.user.id })
-        .select()
-        .single();
-      if (error)
-        setMessage(
-          error.code === "23505"
-            ? "You already saved this link."
-            : error.message,
-        );
-      else {
-        setItems((old) => [data, ...old]);
+      try {
+        const user_id = session.user.id;
+        const lookup = () => supabase.from("bookmarks").select("*").eq("user_id", user_id).eq("url", payload.url).maybeSingle();
+        let { data, error } = await lookup();
+        if (error) throw error;
+        let reused = Boolean(data);
+        if (!data) {
+          const inserted = await supabase.from("bookmarks").insert({ ...payload, user_id }).select().single();
+          if (inserted.error?.code === "23505") {
+            const existing = await lookup();
+            if (existing.error) throw existing.error;
+            if (!existing.data) throw inserted.error;
+            data = existing.data;
+            reused = true;
+          } else {
+            if (inserted.error) throw inserted.error;
+            data = inserted.data;
+          }
+        }
+        setItems(old => old.some(x => x.id === data.id) ? old : [data, ...old]);
+        if (folder.length) {
+          const rows = [...new Set(folder)].map(folder_id => ({bookmark_id: data.id, folder_id, user_id}));
+          const result = await supabase.from("bookmark_folders").upsert(rows, {onConflict:"bookmark_id,folder_id", ignoreDuplicates:true});
+          if (result.error) throw new Error("Bookmark is in your library, but folder assignment failed. Retry Save: " + result.error.message);
+          setMemberships(old => [...old, ...rows.filter(m => !old.some(x => x.bookmark_id === m.bookmark_id && x.folder_id === m.folder_id))]);
+        }
         setModal(false);
         resetForm();
-        setMessage("Link saved privately.");
+        setSearch("");
+        clearBrowseFilters();
+        setMessage(folder.length ? (reused ? "Existing link added to " : "Link saved to ") + folders.filter(f => folder.includes(f.id)).map(f => f.name).join(", ") + "." : reused ? "This link is already in your library." : "Link saved privately.");
+      } catch (error) {
+        setSaveError(error?.message || "Could not save link. Please retry.");
+      } finally {
+        setBusy(false);
       }
+
     } else {
+      const newId = crypto.randomUUID();
+      setMemberships(old => [...old, ...folder.map(folder_id => ({bookmark_id:newId, folder_id}))]);
       setItems((old) => [
         {
           ...payload,
-          id: crypto.randomUUID(),
+          id: newId,
           saved_at: new Date().toISOString(),
         },
         ...old,
       ]);
       setModal(false);
       resetForm();
+      setSearch("");
+      clearBrowseFilters();
       setMessage("Saved in preview mode (not persisted).");
     }
     setBusy(false);
   }
   function closeSaveModal() {
+    if (folderSaving || busy) return;
+    clearInlineFolder();
+    setSaveError("");
     titleRequest.current += 1;
     aiRequest.current += 1;
     setTitleLoading(false);
@@ -529,6 +581,8 @@ function App() {
     setModal(false);
   }
   function resetForm() {
+    clearInlineFolder();
+    setSaveError("");
     manualTopic.current = false;
     titleRequest.current += 1;
     setTitleLoading(false);
@@ -540,8 +594,44 @@ function App() {
     setTitle("");
     setCategory(defaultCategory);
     setSubcategory(defaultSubcategory);
-    setFolder("");
+    setFolder([]);
     setNotes("");
+  }
+  function clearInlineFolder() {
+    setInlineFolder(false);
+    setInlineName("");
+    setInlineParent("");
+    setFolderError("");
+  }
+  async function createInlineFolder() {
+    const name = inlineName.trim();
+    if (!name || folderSaving || busy) return;
+    setFolderError("");
+    if (folders.some(f => f.name.trim().toLowerCase() === name.toLowerCase() && (f.parent_id || "") === inlineParent)) {
+      setFolderError("A folder with this name already exists here.");
+      return;
+    }
+    setFolderSaving(true);
+    try {
+      const payload = { name, parent_id: inlineParent || null };
+      let created;
+      if (supabase) {
+        if (!session) throw new Error("Please sign in again.");
+        const { data, error } = await supabase.from("folders")
+          .insert({ ...payload, user_id: session.user.id }).select().single();
+        if (error) throw error;
+        created = data;
+      } else {
+        created = { ...payload, id: crypto.randomUUID() };
+      }
+      setFolders(old => [...old, created]);
+      setFolder(old => [...new Set([...old, created.id])]);
+      clearInlineFolder();
+    } catch (error) {
+      setFolderError(error?.message || "Could not create folder. Try again.");
+    } finally {
+      setFolderSaving(false);
+    }
   }
   async function addFolder(e) {
     e.preventDefault();
@@ -567,19 +657,70 @@ function App() {
     setParent("");
     setBusy(false);
   }
-  async function remove(item) {
-    if (!confirm("Delete this saved link?")) return;
-    if (supabase) {
-      const { error } = await supabase
-        .from("bookmarks")
-        .delete()
-        .eq("id", item.id);
-      if (error) {
-        setMessage(error.message);
-        return;
+  async function removeFromFolder(item, folderId) {
+    if (busy || !membershipReady) return;
+    if (!confirm("Remove this video from this folder only? It will remain in your library.")) return;
+    setBusy(true);
+    try {
+      if (supabase) {
+        const { error } = await supabase.from("bookmark_folders")
+          .delete().eq("bookmark_id", item.id).eq("folder_id", folderId);
+        if (error) throw error;
+      } else {
+        setItems(old => old.map(x => x.id === item.id && x.folder_id === folderId ? {...x, folder_id: null} : x));
       }
-    }
-    setItems((old) => old.filter((x) => x.id !== item.id));
+      setMemberships(old => old.filter(m => m.bookmark_id !== item.id || m.folder_id !== folderId));
+      setMessage("Removed from folder. Video remains in your library.");
+    } catch (error) { setMessage(error.message || "Could not remove from folder."); }
+    finally { setBusy(false); }
+  }
+  async function remove(item) {
+    if (busy) return;
+    if (activeFolder) return removeFromFolder(item, activeFolder.id);
+    if (!confirm("Permanently delete this saved link from your entire library and all folders?")) return;
+    setBusy(true);
+    try {
+      if (supabase) {
+        const { error } = await supabase.from("bookmarks").delete().eq("id", item.id);
+        if (error) throw error;
+      }
+      setItems(old => old.filter(x => x.id !== item.id));
+      setMemberships(old => old.filter(m => m.bookmark_id !== item.id));
+    } catch (error) { setMessage(error.message || "Could not delete saved link."); }
+    finally { setBusy(false); }
+  }
+  function openPicker(kind, id) {
+    if (!membershipReady) return;
+    setPicker({kind,id}); setSelected(kind === "video" ? folderIds(items.find(x => x.id === id)) : []); setPickerSearch(""); setPickerError("");
+  }
+  async function applyPicker(e) {
+    e.preventDefault(); if (busy || !picker || !membershipReady) return;
+    setBusy(true); setPickerError("");
+    try {
+      const additions = picker.kind === "video" ? selected.filter(id => !folderIds(items.find(x => x.id === picker.id)).includes(id)).map(folder_id => ({bookmark_id:picker.id,folder_id})) : selected.map(bookmark_id => ({bookmark_id,folder_id:picker.id}));
+      const removed = picker.kind === "video" ? folderIds(items.find(x => x.id === picker.id)).filter(id => !selected.includes(id)) : [];
+      if (additions.length) {
+        if (supabase) { const {error} = await supabase.from("bookmark_folders").upsert(additions.map(m => ({...m,user_id:session.user.id})), {onConflict:"bookmark_id,folder_id",ignoreDuplicates:true}); if(error) throw error; }
+        setMemberships(old => [...old, ...additions.filter(m => !old.some(x => x.bookmark_id === m.bookmark_id && x.folder_id === m.folder_id))]);
+      }
+      if (removed.length) {
+        if (supabase) { const {error} = await supabase.from("bookmark_folders").delete().eq("bookmark_id",picker.id).in("folder_id",removed); if(error) throw error; }
+        else setItems(old => old.map(x => x.id === picker.id && removed.includes(x.folder_id) ? {...x,folder_id:null} : x));
+        setMemberships(old => old.filter(m => m.bookmark_id !== picker.id || !removed.includes(m.folder_id)));
+      }
+      setPicker(null); setMessage("Folders updated.");
+    } catch(error) { setPickerError(error.message || "Could not update folders."); } finally { setBusy(false); }
+  }
+  async function renameFolder() {
+    if (!activeFolder || busy) return;
+    const name = prompt("Rename folder", activeFolder.name)?.trim(); if (!name || name === activeFolder.name || name.length > 80) return;
+    setBusy(true); try { if (supabase) {const {error}=await supabase.from("folders").update({name}).eq("id",activeFolder.id); if(error) throw error;} setFolders(old=>old.map(f=>f.id===activeFolder.id?{...f,name}:f)); } catch(error){setMessage(error.message);} finally{setBusy(false);}
+  }
+  async function deleteFolder() {
+    if (!activeFolder || busy) return;
+    if (folders.some(f=>f.parent_id===activeFolder.id)) {setMessage("Remove or reorganize subfolders before deleting this folder."); return;}
+    if (!confirm("Delete this folder? Your saved videos will remain in All saved.")) return;
+    setBusy(true); try { if(supabase){const {error}=await supabase.from("folders").delete().eq("id",activeFolder.id);if(error)throw error;} setFolders(old=>old.filter(f=>f.id!==activeFolder.id));setMemberships(old=>old.filter(m=>m.folder_id!==activeFolder.id));setItems(old=>old.map(x=>x.folder_id===activeFolder.id?{...x,folder_id:null}:x));setActive("all");setSearch("");clearBrowseFilters(); }catch(error){setMessage(error.message);}finally{setBusy(false);}
   }
   const label =
     active === "all"
@@ -591,12 +732,34 @@ function App() {
           : active.startsWith("folder:")
             ? folders.find((f) => f.id === active.slice(7))?.name || "Folder"
             : active.slice(9);
-  const nav = (name, id, Icon, count) => (
+  // Render folders in parent-first order, guarding against invalid parent links.
+  const folderTree = [];
+  const visitedFolders = new Set();
+  function visitFolder(f, depth = 0) {
+    if (visitedFolders.has(f.id)) return;
+    visitedFolders.add(f.id);
+    folderTree.push({ ...f, depth });
+    folders.filter(child => child.parent_id === f.id).forEach(child => visitFolder(child, depth + 1));
+  }
+  folders.filter(f => !f.parent_id || !folders.some(p => p.id === f.parent_id)).forEach(f => visitFolder(f));
+  folders.forEach(f => visitFolder(f));
+  const ancestors = [];
+  const seenAncestors = new Set(activeFolder ? [activeFolder.id] : []);
+  let ancestor = activeFolder && folders.find(f => f.id === activeFolder.parent_id);
+  while (ancestor && !seenAncestors.has(ancestor.id)) {
+    seenAncestors.add(ancestor.id);
+    ancestors.unshift(ancestor);
+    ancestor = folders.find(f => f.id === ancestor.parent_id);
+  }
+  const navigateFolder = (id) => { setActive("folder:" + id); setSearch(""); clearBrowseFilters(); setMenu(false); };
+  const nav = (name, id, Icon, count, depth = 0) => (
     <button
       key={id}
+      style={depth ? {paddingLeft: 12 + Math.min(depth, 8) * 17} : undefined}
       className={"nav-item " + (active === id ? "selected" : "")}
       onClick={() => {
         setActive(id);
+        setSearch("");
         clearBrowseFilters();
         setMenu(false);
       }}
@@ -696,7 +859,7 @@ function App() {
         <button
           className="new-btn"
           onClick={() => {
-            setModal(true);
+            openSave();
             setMenu(false);
           }}
         >
@@ -719,17 +882,18 @@ function App() {
             <button
               className="small-icon"
               title="Create folder"
-              onClick={() => setFolderModal(true)}
+              onClick={() => {setParent(activeFolder?.id || ""); setFolderModal(true);}}
             >
               <Plus size={16} />
             </button>
           </div>
-          {folders.map((f) =>
+          {folderTree.map((f) =>
             nav(
-              (f.parent_id ? "↳ " : "") + f.name,
+              f.name,
               "folder:" + f.id,
               Folder,
-              items.filter((x) => x.folder_id === f.id).length,
+              items.filter((x) => folderIds(x).includes(f.id)).length,
+              f.depth,
             ),
           )}
           {folders.length === 0 && (
@@ -769,7 +933,7 @@ function App() {
             <Menu size={22} />
           </button>
           <div className="breadcrumb">
-            Your library <span>/</span> <strong>{label}</strong>
+            Your library {ancestors.map(f => <React.Fragment key={f.id}><span>/</span><button type="button" onClick={() => navigateFolder(f.id)} style={{border:0,background:"none",padding:0,color:"inherit",font:"inherit",textDecoration:"underline"}}>{f.name}</button></React.Fragment>)} <span>/</span> <strong>{label}</strong>
           </div>
           <div className="top-actions">
             <span className="top-private">
@@ -777,7 +941,7 @@ function App() {
             </span>
             <button
               className="primary header-add"
-              onClick={() => setModal(true)}
+              onClick={openSave}
             >
               <Plus size={17} /> Save link
             </button>
@@ -799,6 +963,7 @@ function App() {
               {shown.length} {shown.length === 1 ? "item" : "items"}
             </span>
           </div>
+          {activeFolder && <div className="folder-tools"><button className="primary" onClick={openSave}><Plus size={16}/> New link</button><button className="secondary" disabled={!membershipReady} onClick={()=>openPicker("folder",activeFolder.id)}><Bookmark size={16}/> Add from library</button><button className="secondary" disabled={busy} onClick={renameFolder}>Rename</button><button className="secondary" disabled={busy} onClick={deleteFolder}><Trash2 size={15}/> Delete folder</button></div>}
           <div className="toolbar">
             <div className="search">
               <Search size={19} />
@@ -879,14 +1044,14 @@ function App() {
                     {Array.isArray(item.tags) && item.tags.length > 0 && <div className="tags mini-tags">{item.tags.slice(0, 3).map((tag) => <button type="button" key={tag} className="tag muted" onClick={() => { setActive("all"); setBrowseSubcategory(""); setBrowseTag(tag); }}>#{tag}</button>)}</div>}
                     {item.needs_review && <button type="button" className="review-link" onClick={() => { setActive("all"); clearBrowseFilters(); setReviewOnly(true); }}>Needs review</button>}
                     <div className="card-footer">
-                      {item.folder_id && folders.find((f) => f.id === item.folder_id) ? <span className="folder-hint"><Folder size={13} /> {folders.find((f) => f.id === item.folder_id).name}</span> : <span className="folder-hint">Saved to library</span>}
-                      <div className="card-actions"><a title="Open original" href={item.url} target="_blank" rel="noopener noreferrer"><ArrowUpRight size={18} /></a><button title="Delete saved link" onClick={() => remove(item)}><Trash2 size={16} /></button></div>
+                      <span className="folder-hint" title={folders.filter(f=>folderIds(item).includes(f.id)).map(f=>f.name).join(", ")}>{folderIds(item).length ? <><Folder size={13}/>{folders.filter(f=>folderIds(item).includes(f.id)).map(f=>f.name).join(", ")}</> : "Saved to library"}</span>
+                      <div className="card-actions"><button title="Manage folders" aria-label="Manage folders" disabled={!membershipReady} onClick={()=>openPicker("video",item.id)}><Folder size={17}/></button><a title="Open original" href={item.url} target="_blank" rel="noopener noreferrer"><ArrowUpRight size={18} /></a><button title={activeFolder ? "Remove from folder" : "Delete from library"} aria-label={activeFolder ? "Remove from folder" : "Delete from library"} disabled={busy || (!!activeFolder && !membershipReady)} onClick={() => remove(item)}>{activeFolder ? <X size={16} /> : <Trash2 size={16} />}</button></div>
                     </div>
                   </div>
                 </article>
               );
             })}
-            {shown.length === 0 && <div className="empty"><div className="empty-icon"><Bookmark size={29} /></div><h3>Nothing here yet</h3><p>Save a video or try another filter to find what you are looking for.</p><button className="primary" onClick={() => setModal(true)}><Plus size={16} /> Save a link</button></div>}
+            {shown.length === 0 && <div className="empty"><div className="empty-icon"><Bookmark size={29} /></div><h3>Nothing here yet</h3><p>Save a video or try another filter to find what you are looking for.</p><button className="primary" onClick={openSave}><Plus size={16} /> Save a link</button></div>}
           </div>
           <footer>
             ReelMind · A little less scrolling, a lot more finding.
@@ -901,7 +1066,7 @@ function App() {
           }}
         >
           <div
-            className="modal"
+            className="modal save-modal"
             role="dialog"
             aria-modal="true"
             aria-label="Save a link"
@@ -960,40 +1125,43 @@ function App() {
                   }}
                 />
               </label>
-              {titleLoading && (
-                <small className="helper">{identify(url.trim()) === "instagram" ? "Fetching Instagram caption…" : "Fetching YouTube title…"}</small>
-              )}
+              {(titleLoading || aiLoading) && <div className="save-progress" role="status" aria-live="polite">
+                {titleLoading || aiLoading ? (
+                  <><span className="save-spinner" aria-hidden="true" /><div><strong>{titleLoading ? (identify(url.trim()) === "instagram" ? "Fetching Instagram caption…" : "Fetching YouTube title…") : "Finding the right topic…"}</strong><small>{titleLoading ? "Retrieving available video details." : "Analyzing the title and available caption."}</small></div></>
+                ) : null}
+              </div>}
+              <details className="save-disclosure">
+                <summary><ShieldCheck size={15}/> How AI works <ChevronDown size={15}/></summary>
               {identify(url.trim()) === "instagram" && (
-                <p className="helper" role="status">
+                <p className="save-disclosure-text" role="status">
                   Instagram metadata is fetched automatically when available. If it cannot be retrieved, enter a descriptive title or caption and use Suggest with AI. ReelMind saves the link, not the video.
                 </p>
               )}
-              <p className="helper">
+              <p className="save-disclosure-text">
                 YouTube titles and available Instagram captions are automatically sent to Google Gemini for classification. Instagram links are sent to OpenGraph.io to retrieve metadata. For other links, use Suggest with AI.
                 ReelMind does not watch the video or send your personal notes.
                 You can always choose a topic yourself.
               </p>
+              </details>
+              {message && <p className="save-feedback" role="status">{message}</p>}
               <button
                 type="button"
-                className="secondary"
+                className="secondary save-ai-button"
                 disabled={titleLoading || aiLoading || !title.trim() || !supabase}
                 onClick={() => { manualTopic.current = false; void suggestWithAI(title, instagramCaption.current); }}
               >
                 {aiLoading ? "Analyzing…" : "Suggest with AI"}
               </button>
               {aiSuggestion && (
-                <div className="ai-suggestion" role="status">
-                  <strong>AI suggestion</strong>
-                  <p>Subject: {aiSuggestion.subject || "Not identified"}</p>
-                  <p>
-                    Tags: {aiSuggestion.tags.length
-                      ? aiSuggestion.tags.join(", ")
-                      : "None suggested"}
-                  </p>
-                  <small>Suggested topic: {aiSuggestion.category}{aiSuggestion.subcategory ? ` / ${aiSuggestion.subcategory}` : ""}</small>
-                  {aiSuggestion.confidence !== null && <p><small>AI confidence estimate: {Math.round(aiSuggestion.confidence * 100)}%</small></p>}
-                  {aiSuggestion.needsReview && <p><small>Please review this classification.</small></p>}
-                  <p><small>Review the topic below before saving.</small></p>
+                <div className="ai-suggestion refined-suggestion" role="status">
+                  <div className="suggestion-heading">
+                    <span><Check size={15} aria-hidden="true"/> AI suggestion</span>
+                    {aiSuggestion.confidence !== null && <small>{Math.round(aiSuggestion.confidence * 100)}% confidence estimate</small>}
+                  </div>
+                  <strong className="suggestion-subject">{aiSuggestion.subject || "Subject not identified"}</strong>
+                  <div className="suggestion-topic"><span>{aiSuggestion.category}</span>{aiSuggestion.subcategory && <span>{aiSuggestion.subcategory}</span>}</div>
+                  <div className="suggestion-tags" aria-label="Suggested tags">{aiSuggestion.tags.length ? aiSuggestion.tags.map((tag, i) => <span key={i}>#{tag.replace(/^#/, "")}</span>) : <small>No tags suggested</small>}</div>
+                  <small className="suggestion-hint">{aiSuggestion.needsReview ? "Please review this classification before saving." : "You can change the topic below before saving."}</small>
                 </div>
               )}
               <div className="two-col">
@@ -1018,21 +1186,17 @@ function App() {
                     </optgroup>
                   </select>
                 </label>
-                <label>
-                  Folder
-                  <select
-                    value={folder}
-                    onChange={(e) => setFolder(e.target.value)}
-                  >
-                    <option value="">No folder</option>
-                    {folders.map((f) => (
-                      <option key={f.id} value={f.id}>
-                        {f.name}
-                      </option>
-                    ))}
-                  </select>
-                </label>
+                <div className="save-folder-field"><span className="save-folder-label">Folders <button type="button" className="save-folder-add" disabled={folderSaving || busy || !membershipReady} onClick={() => {setInlineFolder(true);setFolderError("");}}><Plus size={14}/> New folder</button></span><details className="folder-select"><summary>{folder.length ? folders.filter(f => folder.includes(f.id)).map(f => f.name).join(", ") : "No folder"}<ChevronDown size={15}/></summary><div className="folder-options">{folderTree.map(f=><label key={f.id}><input type="checkbox" disabled={!membershipReady || busy} checked={folder.includes(f.id)} onChange={()=>setFolder(old=>old.includes(f.id)?old.filter(id=>id!==f.id):[...old,f.id])}/>{"— ".repeat(f.depth)}{f.name}</label>)}{!folders.length && <small>No folders yet</small>}</div></details></div>
               </div>
+              {inlineFolder && (
+                <section className="inline-folder" aria-label="Create a folder">
+                  <strong>Create a new folder</strong>
+                  <label>Folder name<input autoFocus maxLength={80} value={inlineName} disabled={folderSaving} placeholder="e.g. Favourite videos" onChange={e => setInlineName(e.target.value)} onKeyDown={e => { if (e.key === "Enter") { e.preventDefault(); void createInlineFolder(); } }}/></label>
+                  <label>Inside folder (optional)<select value={inlineParent} disabled={folderSaving} onChange={e => setInlineParent(e.target.value)}><option value="">Top level</option>{folderTree.map(f => <option key={f.id} value={f.id}>{"— ".repeat(f.depth)}{f.name}</option>)}</select></label>
+                  {folderError && <p className="save-feedback" role="alert">{folderError}</p>}
+                  <div className="inline-folder-actions"><button type="button" className="secondary" disabled={folderSaving} onClick={clearInlineFolder}>Cancel</button><button type="button" className="primary" disabled={!inlineName.trim() || folderSaving || busy} onClick={createInlineFolder}><Plus size={15}/>{folderSaving ? "Creating…" : "Create folder"}</button></div>
+                </section>
+              )}
                {subcategoriesFor(category).length > 0 && (
                  <label>
                    Subcategory
@@ -1059,7 +1223,8 @@ function App() {
                   onChange={(e) => setNotes(e.target.value)}
                 />
               </label>
-              <div className="modal-buttons">
+              {saveError && <p className="save-feedback" role="alert">{saveError}</p>}
+              <div className="modal-buttons save-sticky-actions">
                 <button
                   type="button"
                   className="secondary"
@@ -1067,7 +1232,7 @@ function App() {
                 >
                   Cancel
                 </button>
-                <button className="primary" disabled={busy || titleLoading || aiLoading}>
+                <button className="primary" disabled={busy || titleLoading || aiLoading || folderSaving || inlineFolder}>
                   <Bookmark size={16} />
                   {busy ? "Saving…" : "Save link"}
                 </button>
@@ -1076,6 +1241,7 @@ function App() {
           </div>
         </div>
       )}
+      {picker && <div className="modal-backdrop"><div className="modal compact" role="dialog" aria-modal="true" aria-label="Manage folders"><div className="modal-heading"><div><span className="eyebrow">YOUR COLLECTION</span><h2>{picker.kind === "folder" ? "Add from library" : "Manage folders"}</h2></div><button className="icon-btn" disabled={busy} onClick={()=>setPicker(null)}><X size={20}/></button></div><form onSubmit={applyPicker}><label>Search<input value={pickerSearch} onChange={e=>setPickerSearch(e.target.value)} placeholder="Search…"/></label><div className="folder-picker-list">{(picker.kind === "folder" ? items.filter(x=>!folderIds(x).includes(picker.id)).map(x=>({id:x.id,name:x.title})) : folders).filter(x=>x.name.toLowerCase().includes(pickerSearch.toLowerCase())).map(x=><label key={x.id}><input type="checkbox" disabled={busy} checked={selected.includes(x.id)} onChange={()=>setSelected(old=>old.includes(x.id)?old.filter(id=>id!==x.id):[...old,x.id])}/><span>{x.name}</span></label>)}</div><p className="folder-picker-hint">{picker.kind === "folder" ? "Videos stay in their original folders." : "Uncheck a folder to remove the video from that folder only."}</p>{pickerError && <p className="save-feedback" role="alert">{pickerError}</p>}<div className="modal-buttons"><button type="button" className="secondary" disabled={busy} onClick={()=>setPicker(null)}>Cancel</button><button className="primary" disabled={busy || (picker.kind === "folder" && !selected.length)}>{busy?"Saving…":"Save changes"}</button></div></form></div></div>}
       {folderModal && (
         <div
           className="modal-backdrop"
@@ -1120,11 +1286,9 @@ function App() {
                   onChange={(e) => setParent(e.target.value)}
                 >
                   <option value="">Top level</option>
-                  {folders
-                    .filter((f) => !f.parent_id)
-                    .map((f) => (
+                  {folderTree.map((f) => (
                       <option key={f.id} value={f.id}>
-                        {f.name}
+                        {"— ".repeat(f.depth)}{f.name}
                       </option>
                     ))}
                 </select>

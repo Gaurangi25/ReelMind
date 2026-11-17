@@ -1,43 +1,98 @@
-# ReelMind — privacy-first bookmarking starter
+# ReelMind 🎬
 
-A responsive React web MVP for saving Instagram, YouTube and other URLs into a personal, date-organized library. **This is an early web foundation, not yet the Android share-target app or a production launch.**
+**Save it now. Find it when you need it.**
 
-## What works
-- Email/password sign-up and sign-in through Supabase Auth (when configured)
-- Private bookmarks and folders with PostgreSQL row-level security
-- Save URLs, choose a topic, add notes, create nested folders, search, filter, delete
-- Date recorded automatically on save
-- Local *preview only* when Supabase isn't configured (sample links and changes are lost on refresh)
-- Responsive, deliberately restrained UI
+ReelMind is an AI-powered video bookmarking application that helps you save, organize, and rediscover Instagram Reels and YouTube videos in one place.
 
-## Setup
-1. Install Node.js 20+.
-2. In this folder run `npm install`.
-3. Create a Supabase project at https://supabase.com and enable email auth. For a public app, configure email confirmation, rate limits, and a reliable SMTP provider.
-4. Paste `supabase/schema.sql` into the Supabase SQL editor and run it **once on a new project**. Review the SQL before running it.
-5. Copy `.env.example` to `.env.local` and fill in the project URL and publishable/anon key from Supabase. **Never put a service_role or secret key in VITE_ variables.**
-6. Run `npm run dev` and open the shown localhost address.
-7. Run `npm run build` before deployment.
+Instead of losing useful videos in endless saved collections, ReelMind automatically categorizes your bookmarks and makes them easy to find.
 
-## Security design
-- Supabase handles password hashing and sessions. The browser only receives the public/publishable key.
-- RLS restricts SELECT/INSERT/UPDATE/DELETE to authenticated owners. Composite foreign keys stop cross-user folder references.
-- No analytics or third-party content fetches are performed by this starter. Opening a saved URL visits the original platform.
-- Browser input is rendered through React (not injected as HTML). URLs are limited to http(s) and links use `noopener noreferrer`.
-- The SQL assumes a fresh Supabase project. If policies already exist, adapt migrations rather than re-running.
+## Features
 
-## Not implemented yet
-- **Android share-sheet integration**: requires a React Native/Expo development build with native Android share-intent handling; this ZIP is the functioning web foundation.
-- **Real AI categorization**: currently a transparent local title-keyword suggestion. A later secure backend worker will use approved metadata and an LLM with explicit privacy controls. Never expose an AI API secret in the frontend.
-- Metadata enrichment, thumbnails, background jobs, multiple folder assignments, WhatsApp import, password reset UI, offline queue, email verification UX, deletion/export controls, and abuse/rate-limit testing.
+- **AI-Powered Organization** — Automatically categorizes videos into relevant categories, subcategories, and tags using Gemini AI.
+- **Smart Collections** — Organize bookmarks into multiple folders and nested collections.
+- **Chrome Extension** — Save videos directly from your browser.
+- **Android PWA** — Share videos directly from Instagram and YouTube to ReelMind.
+- **Search & Filters** — Quickly find saved videos.
+- **Personalized Workspace** — Multiple themes, wallpapers, and layout preferences.
+- **Secure Authentication** — Private user accounts with Supabase Authentication.
+- **Cloud Sync** — Access your bookmarks and preferences across devices.
 
-## Production release checklist
-- Verify RLS with two separate accounts, including attempted cross-account folder IDs.
-- Test login, email verification, recovery, sign-out, session expiry and device loss.
-- Add privacy policy, terms, account/data deletion and export, and retention rules.
-- Apply abuse controls, monitoring without sensitive content logging, and backup/restore tests.
-- Test mobile accessibility, keyboard navigation, input validation, and all error paths.
-- Audit all dependencies and review platform/API policies before fetching third-party metadata.
+## Tech Stack
 
-## Architecture direction
-Keep Supabase Auth + PostgreSQL RLS as the identity/data foundation. Add an Android React Native client using the same authenticated backend and a server-side metadata/classification worker. Android shares should save the URL first and categorize asynchronously. The original link must remain available if classification fails.
+| Technology | Purpose |
+|---|---|
+| React + Vite | Frontend |
+| JavaScript + CSS | Application UI |
+| Supabase | Authentication, database, storage |
+| PostgreSQL + RLS | Secure data management |
+| Supabase Edge Functions | Backend functions |
+| Google Gemini | AI video classification |
+| Chrome Extension | Browser integration |
+| Vercel | Deployment |
+
+## Project Structure
+
+```text
+reelmind-starter/
+├── docs/               # Documentation
+├── extension/          # Chrome extension
+├── public/             # Static assets and PWA files
+├── src/                # React application
+├── supabase/           # Supabase configuration and functions
+├── .env.example        # Environment variable template
+├── index.html
+├── package.json
+├── README.md
+└── vercel.json
+```
+
+## Getting Started
+
+**1. Clone the repository**
+
+```bash
+git clone https://github.com/Gaurangi25/ReelMind.git
+cd ReelMind
+```
+
+**2. Install dependencies**
+
+```bash
+npm install
+```
+
+**3. Configure environment variables**
+
+Create a `.env.local` file using `.env.example` as a reference and add your Supabase configuration.
+
+**4. Start the development server**
+
+```bash
+npm run dev
+```
+
+The application will run locally at `http://localhost:5173`.
+
+## Chrome Extension
+
+To install the extension locally:
+
+1. Open `chrome://extensions/` in Chrome.
+2. Enable **Developer mode**.
+3. Click **Load unpacked**.
+4. Select the `extension/` folder.
+5. Open a YouTube or Instagram video and use the extension to save it.
+
+## Live Application
+
+**Website:** https://reelmind-henna.vercel.app/
+
+## Author
+
+**Gaurangi Agarwal**
+
+GitHub: https://github.com/Gaurangi25
+
+---
+
+*Built to make saving and finding videos simpler.*
